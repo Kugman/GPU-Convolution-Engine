@@ -6,11 +6,10 @@
 #include <vector>
 #include <chrono>
 
-#define N 150
+#define N 200
 #define K 3
 
 using namespace std;
-
 using Matrix = vector<vector<float>>;
 
 Matrix conv2D_CPU(const Matrix& input, const Matrix& kernel) {
@@ -35,11 +34,35 @@ Matrix conv2D_CPU(const Matrix& input, const Matrix& kernel) {
     return output;
 }
 
-__global__ void conv2D_GPU(const float *input, const float *kernel, float* output, const int n, const int k) {
-
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void conv2D_GPU(const float *__restrict__ input, const float * __restrict__ kernel, float *__restrict__ output, const int n, const int k) {
+    
+    extern __shared__ float shmem[];
+    float* tile = shmem;
+    float* shKernel = (float*)&tile[(blockDim.y + k - 1) * (blockDim.x + k - 1)];
+    
     int pad = k / 2;
+    int tile_size_x = blockDim.x;
+    int tile_size_y = blockDim.y;
+
+    int row = blockIdx.y * tile_size_y + threadIdx.y;
+    int col = blockIdx.x * tile_size_x + threadIdx.x;
+
+    int shared_row = threadIdx.y + pad;
+    int shared_col = threadIdx.x + pad;  
+    
+    if (threadIdx.y < k && threadIdx.x < k)
+        shKernel[threadIdx.y * k + threadIdx.x] = kernel[threadIdx.y * k + threadIdx.x];
+    
+    int global_row = row - pad;
+    int global_col = col - pad;
+    if (shared_row < tile_size_y + 2 * pad && shared_col < tile_size_x + 2 * pad) {
+        if (global_row >= 0 && global_row < n && global_col >= 0 && global_col < n)
+            tile[shared_row * (tile_size_x + 2 * pad) + shared_col] = input[global_row * n + global_col];
+        else
+            tile[shared_row * (tile_size_x + 2 * pad) + shared_col] = 0.0f;
+    }
+
+    __syncthreads();
 
     if (row < pad || row >= n - pad || col < pad || col >= n - pad) return;
 
@@ -47,7 +70,7 @@ __global__ void conv2D_GPU(const float *input, const float *kernel, float* outpu
     
     for (int i = -pad; i <= pad; i++) 
         for (int j = -pad; j <= pad; j++)
-            sum += input[(row + i) * n + (col + j)] * kernel[(i + pad) * k + (j + pad)];
+            sum += tile[(shared_row + i) * (tile_size_x + 2 * pad) + (shared_col + j)] * shKernel[(i + pad) * k + (j + pad)];
 
     output[row * n + col] = sum;
     
@@ -92,14 +115,16 @@ int main()
     cudaMemcpy(d_kernel, h_kernel, K * K * sizeof(float), cudaMemcpyHostToDevice);
 
     dim3 threadsPerBlock(16, 16);
-    dim3 numBlocks((N + threadsPerBlock.x - 1) / threadsPerBlock.x, (N + threadsPerBlock.y) / threadsPerBlock.y);
+    dim3 numBlocks((N + threadsPerBlock.x - 1) / threadsPerBlock.x, (N + threadsPerBlock.y - 1) / threadsPerBlock.y);
     
+    int sharedMemSize = (threadsPerBlock.x + K - 1) * (threadsPerBlock.y + K - 1) * sizeof(float) + K * K * sizeof(float);
+
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
     cudaEventRecord(start);
-    conv2D_GPU <<<numBlocks, threadsPerBlock>>> (d_input, d_kernel, d_output, N, K);
+    conv2D_GPU <<<numBlocks, threadsPerBlock, sharedMemSize>>> (d_input, d_kernel, d_output, N, K);
     cudaEventRecord(stop);
 
     cudaMemcpy(h_output, d_output, N * N * sizeof(float), cudaMemcpyDeviceToHost);
