@@ -1,11 +1,12 @@
-﻿
+
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+
 #include <iostream>
 #include <vector>
-#include <stdio.h>
+#include <chrono>
 
-#define N 5
+#define N 150
 #define K 3
 
 using namespace std;
@@ -34,7 +35,7 @@ Matrix conv2D_CPU(const Matrix& input, const Matrix& kernel) {
     return output;
 }
 
-__global__ void conv2D_GPU(float *input, float *kernel, float* output, int n, int k) {
+__global__ void conv2D_GPU(const float *input, const float *kernel, float* output, const int n, const int k) {
 
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -60,21 +61,21 @@ void cpyToHost(const Matrix &m, float* h, const int size) {
 
 int main()
 {
-    Matrix input = {
-        {1, 2, 3, 4, 5},
-        {5, 6, 7, 8, 9},
-        {9, 10, 11, 12, 13},
-        {13, 14, 15, 16, 17},
-        {17, 18, 19, 20, 21}
-    };
-
+    Matrix input(N, vector<float>(N));
     Matrix kernel = {
         {1, 1, 1},
         {1, 1, 1},
         {1, 1, 1}
     };
-
+    
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++)
+            input[i][j] = i % 255;
+    
+    auto start_cpu = chrono::high_resolution_clock::now();
     Matrix cpu_output = conv2D_CPU(input, kernel);
+    auto end_cpu = chrono::high_resolution_clock::now();
+    chrono::duration<double, milli> cpu_time = end_cpu - start_cpu;
 
     float h_input[N * N], h_kernel[K*K], h_output[N * N] = {0};
     cpyToHost(input, h_input, N);
@@ -93,31 +94,41 @@ int main()
     dim3 threadsPerBlock(16, 16);
     dim3 numBlocks((N + threadsPerBlock.x - 1) / threadsPerBlock.x, (N + threadsPerBlock.y) / threadsPerBlock.y);
     
-    conv2D_GPU <<<numBlocks, threadsPerBlock>>> (d_input, d_kernel, d_output, N, K);
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 
-    cudaDeviceSynchronize();
+    cudaEventRecord(start);
+    conv2D_GPU <<<numBlocks, threadsPerBlock>>> (d_input, d_kernel, d_output, N, K);
+    cudaEventRecord(stop);
 
     cudaMemcpy(h_output, d_output, N * N * sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaEventSynchronize(stop);
+    float gpu_time = 0;
+    cudaEventElapsedTime(&gpu_time, start, stop);
 
     cudaFree(d_input);
     cudaFree(d_kernel);
     cudaFree(d_output);
 
-    cout << "GPU Convolution output : " << endl;
-    for (int i = 0; i < N; i++) {
-        for (int j = 0; j < N; j++)
-            cout << h_output[i * N + j] << "\t";
-        cout << endl;
-    }
-
+    cout << "GPU Time: " << gpu_time << " ms" << endl;
+    //cout << "Convolution output : " << endl;
+    //for (int i = 0; i < N; i++) {
+    //    for (int j = 0; j < N; j++)
+    //        cout << h_output[i * N + j] << "\t";
+    //    cout << endl;
+    //}
+    //cout << endl;
 
     
-    cout << "CPU Convolution output: " << endl;
-    for (auto& row : cpu_output) {
-        for (auto& val : row)
-            cout << val << "\t";
-        cout << endl;
-    }
+    cout << "CPU Time: " << cpu_time.count() << " ms" << endl;
+    //cout << "Convolution output : " << endl;
+    //for (auto& row : cpu_output) {
+    //    for (auto& val : row)
+    //        cout << val << "\t";
+    //    cout << endl;
+    //}
 
 
     return 0;
